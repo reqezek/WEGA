@@ -80,6 +80,54 @@
   fitCanvas();
   window.addEventListener('resize', fitCanvas);
 
+  // AUDIO: Web Audio API setup + preload
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  const audioCtx = new AudioContextClass();
+  const sounds = {}; // AudioBuffer map
+
+  async function loadSound(name, url) {
+    try {
+      const r = await fetch(url);
+      const ab = await r.arrayBuffer();
+      sounds[name] = await audioCtx.decodeAudioData(ab);
+    } catch (err) {
+      console.warn('Failed to load sound', name, url, err);
+    }
+  }
+
+  async function preloadAll() {
+    // user uploaded files at assets/sfx/
+    await Promise.all([
+      loadSound('jump', 'assets/sfx/jump.ogg'),
+      loadSound('explode', 'assets/sfx/explode.ogg'),
+      loadSound('win', 'assets/sfx/win.ogg')
+    ]);
+    console.log('SFX preloaded');
+  }
+  preloadAll();
+
+  function resumeAudioOnGesture() {
+    const resume = async () => {
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
+      window.removeEventListener('pointerdown', resume);
+      window.removeEventListener('keydown', resume);
+    };
+    window.addEventListener('pointerdown', resume);
+    window.addEventListener('keydown', resume);
+  }
+  resumeAudioOnGesture();
+
+  function playSound(name, {volume=1, rate=1} = {}) {
+    const buf = sounds[name];
+    if (!buf) return;
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf; src.playbackRate.value = rate;
+    const gain = audioCtx.createGain(); gain.gain.value = volume;
+    src.connect(gain); gain.connect(audioCtx.destination);
+    try { src.start(0); } catch(e) { /* might be blocked until gesture */ }
+    return src;
+  }
+
   // world + camera
   const world = { gravity:2000 };
   const cam = { x:0,y:0,zoom:1 };
@@ -254,7 +302,7 @@
     const control = 2200;
     if (input.right) { player.vx += (control/1)*dt; player.omega +=  (control/1)/player.r * dt * 0.5; }
     if (input.left) { player.vx -= (control/1)*dt; player.omega -=  (control/1)/player.r * dt * 0.5; }
-    if (input.jump && onGround(player)) { player.vy = -740; input.jump=false; }
+    if (input.jump && onGround(player)) { player.vy = -740; input.jump=false; playSound('jump'); }
 
     player.x += player.vx * dt;
     player.y += player.vy * dt;
@@ -281,6 +329,7 @@
       if (o.type === 'spike') {
         if (circleRectCollision(player, o)) {
           // death -> reset to start after explosion
+          playSound('explode');
           explodePlayer();
           const s = objects.find(x=>x.type==='start');
           setTimeout(()=>{ if (s) { player.x = s.x + s.w/2; player.y = s.y - player.r - 1; player.vx=0; player.vy=0; player.alive=true; particles.length=0 } }, 900);
@@ -291,6 +340,7 @@
     // winpad
     const win = objects.find(o=>o.type==='win');
     if (win && circleRectCollision(player, win)) {
+      playSound('win');
       alert('You win!');
       // return to editor for quick edits
       mode = 'editor'; toolPanel.style.display = 'block'; footer.textContent='Mode: Editor (Freecam)';
@@ -350,7 +400,9 @@
         const cols = Math.max(1, Math.round(o.w / grid));
         for (let i=0;i<cols;i++) {
           const px = s1.x + i * (sw/cols);
-          ctx.beginPath(); ctx.moveTo(px, s1.y + sh); ctx.lineTo(px + (sw/cols)/2, s1.y); ctx.lineTo(px + (sw/cols), s1.y + sh); ctx.closePath(); ctx.fill();
+          ctx.beginPath(); ctx.moveTo(px, s1.y + sh); ctx.lineTo(px + (sw/cols)/2, s1.y);
+          ctx.lineTo(px + (sw/cols), s1.y + sh);
+          ctx.closePath(); ctx.fill();
         }
       } else if (o.type === 'start') {
         ctx.fillStyle = '#4da6ff'; ctx.fillRect(s1.x, s1.y, sw, sh); ctx.strokeStyle='#1b6fb3'; ctx.lineWidth=2; ctx.strokeRect(s1.x,s1.y,sw,sh);
