@@ -3,27 +3,71 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>2D Rolling Ball Demo</title>
+  <title>2D Rolling Ball Demo + Level Editor</title>
   <style>
     html,body { height:100%; margin:0; background:#0b0b0f; color:#ddd; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif }
     .wrap { display:flex; flex-direction:column; align-items:center; gap:12px; padding:12px }
-    canvas { background:transparent; border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,0.6); }
+    canvas { background:transparent; border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,0.6); cursor: crosshair }
     .ui { color:#ccc; font-size:14px }
     .credits { font-size:12px; color:#888 }
+    .corner-btn { position:fixed; top:16px; right:16px; width:48px; height:48px; background:#111; border:2px solid rgba(255,255,255,0.06); border-radius:6px; display:flex; align-items:center; justify-content:center; cursor:pointer }
+    .corner-btn:hover { background:#171717 }
+    .tool-panel { position:fixed; right:16px; top:80px; width:180px; background:rgba(12,12,12,0.9); border-radius:8px; padding:10px; box-shadow:0 6px 18px rgba(0,0,0,0.6) }
+    .tool { display:flex; gap:8px; margin-bottom:8px }
+    .tool button { flex:1; padding:6px 8px; background:#141414; color:#ddd; border:1px solid rgba(255,255,255,0.04); border-radius:6px; cursor:pointer }
+    .tool button.active { outline:2px solid #2ecc40 }
+    .small { font-size:12px }
+    .footer-ui { position:fixed; left:16px; bottom:16px; color:#ddd; font-size:13px; background:rgba(0,0,0,0.35); padding:8px 12px; border-radius:8px }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h2 style="color:#e6ffe6;margin:0">2D Rolling Ball — W/S to move, Space to jump</h2>
+    <h2 style="color:#e6ffe6;margin:0">2D Rolling Ball — W/S to move, Space to jump — Editor & Play Modes</h2>
     <canvas id="c" width="900" height="480"></canvas>
-    <div class="ui">Controls: W = forward (right), S = back (left), Space = jump</div>
-    <div class="credits">White floor is collidable. Resize the window to fit.</div>
+    <div class="ui">Controls: W/S = move, Space = jump (play mode). Editor: WASD to pan, drag to place/resize.</div>
+    <div class="credits">Create levels with the hammer button (top-right). Place Start and Winpad to play. Spikes reset to start and cause explosion on death.</div>
   </div>
+
+  <div class="corner-btn" id="editorBtn" title="Open Level Editor">
+    <!-- hammer icon -->
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="3" y="14" width="14" height="6" rx="1" fill="#2ecc40" />
+      <path d="M18 6L21 3" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+      <path d="M16 8L21 3" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+  </div>
+
+  <div class="tool-panel" id="toolPanel" style="display:none">
+    <div class="tool">
+      <button id="toolBlock" class="active">Block</button>
+      <button id="toolSpike">Spike</button>
+    </div>
+    <div class="tool">
+      <button id="toolStart">Start</button>
+      <button id="toolWin">Winpad</button>
+    </div>
+    <div class="tool small">
+      <button id="btnPlay">Play</button>
+      <button id="btnClear">Clear</button>
+    </div>
+    <div class="small">Tip: Place Start and Winpad before Play. Resize blocks by dragging their edges.</div>
+  </div>
+
+  <div class="footer-ui" id="footer">Mode: Play</div>
 
 <script>
 (() => {
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
+  const editorBtn = document.getElementById('editorBtn');
+  const toolPanel = document.getElementById('toolPanel');
+  const toolBlock = document.getElementById('toolBlock');
+  const toolSpike = document.getElementById('toolSpike');
+  const toolStart = document.getElementById('toolStart');
+  const toolWin = document.getElementById('toolWin');
+  const btnPlay = document.getElementById('btnPlay');
+  const btnClear = document.getElementById('btnClear');
+  const footer = document.getElementById('footer');
 
   function fitCanvas() {
     const ratio = window.devicePixelRatio || 1;
@@ -36,163 +80,318 @@
   fitCanvas();
   window.addEventListener('resize', fitCanvas);
 
-  const world = {
-    gravity: 2000,
-    floorY: 420,
-  };
+  // world + camera
+  const world = { gravity:2000 };
+  const cam = { x:0,y:0,zoom:1 };
 
-  const ball = {
-    x: 120,
-    y: world.floorY - 60 - 30,
-    r: 30,
-    vx: 0,
-    vy: 0,
-    angle: 0,
-    omega: 0,
-    mass: 1,
-  };
-  ball.inertia = 0.5 * ball.mass * ball.r * ball.r;
+  // objects placed in editor
+  // types: block, spike, start, win
+  const objects = [];
 
-  const input = { left: false, right: false, jump: false };
+  let mode = 'play'; // 'editor' or 'play'
 
-  window.addEventListener('keydown', (e) => {
-    if (e.repeat) return;
-    if (e.key === 'w' || e.key === 'W' || e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') input.right = true;
-    if (e.key === 's' || e.key === 'S' || e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') input.left = true;
-    if (e.code === 'Space') input.jump = true;
+  // player (ball) used in play mode
+  const player = createBall();
+  let particles = [];
+
+  // editor state
+  let currentTool = 'block';
+  let dragging = false;
+  let dragObj = null;
+  let dragStart = null;
+  const grid = 8;
+
+  function createBall() {
+    return { x:100,y:100,r:30,vx:0,vy:0,angle:0,omega:0,alive:true };
+  }
+
+  function worldToScreen(wx,wy) {
+    return { x: (wx - cam.x) * cam.zoom + 450, y: (wy - cam.y) * cam.zoom + 240 };
+  }
+  function screenToWorld(sx,sy) {
+    return { x: (sx - 450)/cam.zoom + cam.x, y: (sy - 240)/cam.zoom + cam.y };
+  }
+
+  // UI handlers
+  editorBtn.addEventListener('click', () => {
+    if (mode === 'editor') {
+      mode = 'play';
+      toolPanel.style.display = 'none';
+      footer.textContent = 'Mode: Play';
+    } else {
+      mode = 'editor';
+      toolPanel.style.display = 'block';
+      footer.textContent = 'Mode: Editor (Freecam)';
+    }
   });
-  window.addEventListener('keyup', (e) => {
-    if (e.key === 'w' || e.key === 'W' || e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') input.right = false;
-    if (e.key === 's' || e.key === 'S' || e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') input.left = false;
-    if (e.code === 'Space') input.jump = false;
+
+  toolBlock.addEventListener('click', ()=> setTool('block'));
+  toolSpike.addEventListener('click', ()=> setTool('spike'));
+  toolStart.addEventListener('click', ()=> setTool('start'));
+  toolWin.addEventListener('click', ()=> setTool('win'));
+  btnPlay.addEventListener('click', () => startPlayMode());
+  btnClear.addEventListener('click', () => { objects.length = 0; });
+
+  function setTool(t) {
+    currentTool = t;
+    [toolBlock,toolSpike,toolStart,toolWin].forEach(b=>b.classList.remove('active'));
+    if (t==='block') toolBlock.classList.add('active');
+    if (t==='spike') toolSpike.classList.add('active');
+    if (t==='start') toolStart.classList.add('active');
+    if (t==='win') toolWin.classList.add('active');
+  }
+
+  // input
+  const input = { left:false,right:false,jump:false,up:false,down:false };
+  window.addEventListener('keydown', e=>{
+    if (mode === 'play') {
+      if (e.key === 'w' || e.key === 'W') input.right = true; // user asked W forward
+      if (e.key === 's' || e.key === 'S') input.left = true;
+      if (e.code === 'Space') input.jump = true;
+    } else {
+      if (e.key === 'w' || e.key === 'W') input.up = true;
+      if (e.key === 's' || e.key === 'S') input.down = true;
+      if (e.key === 'a' || e.key === 'A') input.left = true;
+      if (e.key === 'd' || e.key === 'D') input.right = true;
+    }
+  });
+  window.addEventListener('keyup', e=>{
+    if (mode === 'play') {
+      if (e.key === 'w' || e.key === 'W') input.right = false;
+      if (e.key === 's' || e.key === 'S') input.left = false;
+      if (e.code === 'Space') input.jump = false;
+    } else {
+      if (e.key === 'w' || e.key === 'W') input.up = false;
+      if (e.key === 's' || e.key === 'S') input.down = false;
+      if (e.key === 'a' || e.key === 'A') input.left = false;
+      if (e.key === 'd' || e.key === 'D') input.right = false;
+    }
   });
 
+  // mouse handling for editor
+  let isMouseDown = false;
+  canvas.addEventListener('mousedown', (e) => {
+    if (mode !== 'editor') return;
+    isMouseDown = true;
+    const pos = screenToWorld(e.offsetX, e.offsetY);
+    dragStart = snap(pos);
+    // create new object
+    if (currentTool === 'block' || currentTool === 'spike') {
+      dragObj = { type: currentTool, x: dragStart.x, y: dragStart.y, w: grid*4, h: grid*2 };
+      objects.push(dragObj);
+    } else if (currentTool === 'start' || currentTool === 'win') {
+      // single placement: replace existing of same type
+      // place as small pad
+      const existingIndex = objects.findIndex(o=>o.type===currentTool);
+      const pad = { type: currentTool, x: dragStart.x - grid*2, y: dragStart.y - grid, w: grid*4, h: grid*2 };
+      if (existingIndex !== -1) objects.splice(existingIndex,1,pad); else objects.push(pad);
+      dragObj = pad;
+    }
+  });
+  canvas.addEventListener('mousemove', (e) => {
+    const pos = screenToWorld(e.offsetX, e.offsetY);
+    if (mode === 'editor' && isMouseDown && dragObj) {
+      const p = snap(pos);
+      // update width/height based on drag
+      dragObj.w = Math.max(grid, Math.abs(p.x - dragStart.x));
+      dragObj.h = Math.max(grid, Math.abs(p.y - dragStart.y));
+      dragObj.x = Math.min(p.x, dragStart.x);
+      dragObj.y = Math.min(p.y, dragStart.y);
+    }
+  });
+  window.addEventListener('mouseup', ()=>{ isMouseDown=false; dragObj=null; dragStart=null; });
+
+  // helper
+  function snap(p) { return { x: Math.round(p.x / grid) * grid, y: Math.round(p.y / grid) * grid } }
+
+  // play mode logic
   let last = performance.now();
-  const MAX_STEP = 1/30;
-
-  function step(time) {
-    const dtRaw = (time - last) / 1000;
-    last = time;
-    let dt = Math.min(dtRaw, 0.1);
-
-    const steps = Math.max(1, Math.ceil(dt / MAX_STEP));
-    const subDt = dt / steps;
-    for (let i=0;i<steps;i++) physicsStep(subDt);
+  function step(now) {
+    const dt = Math.min((now - last)/1000, 0.05);
+    last = now;
+    if (mode === 'play') updatePlay(dt);
+    else updateEditor(dt);
     render();
     requestAnimationFrame(step);
   }
 
-  function physicsStep(dt) {
-    ball.vy += world.gravity * dt;
+  function updateEditor(dt) {
+    // camera pan by WASD
+    const speed = 400;
+    if (input.left) cam.x -= speed*dt/ cam.zoom;
+    if (input.right) cam.x += speed*dt/ cam.zoom;
+    if (input.up) cam.y -= speed*dt/ cam.zoom;
+    if (input.down) cam.y += speed*dt/ cam.zoom;
+  }
 
-    const floorTop = world.floorY;
-    const onGround = (ball.y + ball.r) >= floorTop - 0.001 && ball.vy >= 0;
+  function findObjectAt(x,y) { return objects.find(o=>x>=o.x && x<=o.x+o.w && y>=o.y && y<=o.y+o.h); }
 
-    const controlForce = 2200;
-    if (input.right) {
-      ball.vx += (controlForce / ball.mass) * dt;
-      if ((ball.y + ball.r) >= floorTop - 0.5) {
-        ball.omega += (controlForce / ball.mass) / ball.r * dt * 0.6;
+  function startPlayMode() {
+    const hasStart = objects.some(o=>o.type==='start');
+    const hasWin = objects.some(o=>o.type==='win');
+    if (!hasStart || !hasWin) { alert('You must place a Start and a Winpad before playing.'); return; }
+    mode = 'play';
+    toolPanel.style.display = 'none';
+    footer.textContent = 'Mode: Play';
+    // reset player to start
+    const s = objects.find(o=>o.type==='start');
+    player.x = s.x + s.w/2; player.y = s.y - player.r - 1; player.vx=0; player.vy=0; player.alive=true;
+    particles.length = 0;
+  }
+
+  // collision helpers
+  function rectCollides(ax,ay,aw,ah,bx,by,bw,bh) { return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by }
+
+  function updatePlay(dt) {
+    // basic physics
+    if (!player.alive) {
+      // update particles
+      particles.forEach(p=>{ p.vy += world.gravity*dt; p.x += p.vx*dt; p.y += p.vy*dt; p.angle += p.omega*dt; });
+      return;
+    }
+
+    player.vy += world.gravity * dt;
+    const control = 2200;
+    if (input.right) { player.vx += (control/1)*dt; player.omega +=  (control/1)/player.r * dt * 0.5; }
+    if (input.left) { player.vx -= (control/1)*dt; player.omega -=  (control/1)/player.r * dt * 0.5; }
+    if (input.jump && onGround(player)) { player.vy = -740; input.jump=false; }
+
+    player.x += player.vx * dt;
+    player.y += player.vy * dt;
+    player.angle += player.omega * dt;
+
+    // collisions with blocks
+    let collidedFloor = false;
+    for (const o of objects) {
+      if (o.type === 'block' || o.type === 'start' || o.type === 'win') {
+        if (circleRectCollision(player, o)) {
+          // simple resolution: if falling, place on top
+          if (player.vy > 0 && player.y < o.y) {
+            player.y = o.y - player.r; player.vy = 0; collidedFloor = true; player.omega *= 0.9; player.vx *= 0.99;
+          } else {
+            // side collision -> stop horizontal movement
+            if (player.x < o.x) player.x = o.x - player.r; else player.x = o.x + o.w + player.r; player.vx = 0; player.omega = 0;
+          }
+        }
       }
     }
-    if (input.left) {
-      ball.vx -= (controlForce / ball.mass) * dt;
-      if ((ball.y + ball.r) >= floorTop - 0.5) {
-        ball.omega -= (controlForce / ball.mass) / ball.r * dt * 0.6;
+
+    // spikes
+    for (const o of objects) {
+      if (o.type === 'spike') {
+        if (circleRectCollision(player, o)) {
+          // death -> reset to start after explosion
+          explodePlayer();
+          const s = objects.find(x=>x.type==='start');
+          setTimeout(()=>{ if (s) { player.x = s.x + s.w/2; player.y = s.y - player.r - 1; player.vx=0; player.vy=0; player.alive=true; particles.length=0 } }, 900);
+        }
       }
     }
 
-    if ((ball.y + ball.r) >= floorTop - 0.5) {
-      const surfaceVel = ball.omega * ball.r;
-      const slip = ball.vx - surfaceVel;
-      const frictionCoef = 12;
-      const frictionAccel = -Math.sign(slip) * Math.min(Math.abs(slip) * frictionCoef, Math.abs(slip) / dt);
-      ball.vx += frictionAccel * dt;
-      const torque = -frictionAccel * ball.mass * ball.r;
-      ball.omega += torque / ball.inertia * dt * 0.3;
-
-      ball.vx *= 0.995;
-      ball.omega *= 0.995;
-    } else {
-      ball.vx *= 0.999;
-      ball.omega *= 0.999;
+    // winpad
+    const win = objects.find(o=>o.type==='win');
+    if (win && circleRectCollision(player, win)) {
+      alert('You win!');
+      // return to editor for quick edits
+      mode = 'editor'; toolPanel.style.display = 'block'; footer.textContent='Mode: Editor (Freecam)';
     }
 
-    if (input.jump && (ball.y + ball.r) >= floorTop - 0.5) {
-      ball.vy = -720;
-      input.jump = false;
+    // camera follow
+    cam.x = player.x - 450; cam.y = player.y - 240;
+    // simple damping
+    player.vx *= 0.999; player.omega *= 0.999;
+  }
+
+  function onGround(p) {
+    // check if touching any block below
+    return objects.some(o => (o.type==='block' || o.type==='start' || o.type==='win') && (p.y + p.r >= o.y - 1) && (p.y + p.r <= o.y + 6) && (p.x > o.x - p.r && p.x < o.x + o.w + p.r));
+  }
+
+  function circleRectCollision(c, r) {
+    // nearest point
+    const nx = Math.max(r.x, Math.min(c.x, r.x + r.w));
+    const ny = Math.max(r.y, Math.min(c.y, r.y + r.h));
+    const dx = c.x - nx; const dy = c.y - ny;
+    return dx*dx + dy*dy < c.r*c.r;
+  }
+
+  function explodePlayer() {
+    player.alive = false;
+    const pieces = 24; const size = Math.max(4, Math.round(player.r/4));
+    for (let i=0;i<pieces;i++) {
+      const angle = Math.random()*Math.PI*2; const speed = 200 + Math.random()*400;
+      particles.push({ x: player.x + (Math.random()-0.5)*player.r, y: player.y + (Math.random()-0.5)*player.r, vx: Math.cos(angle)*speed, vy: Math.sin(angle)*speed - 200, w:size, h:size, omega:(Math.random()-0.5)*10 });
     }
-
-    ball.x += ball.vx * dt;
-    ball.y += ball.vy * dt;
-    ball.angle += ball.omega * dt;
-
-    if (ball.y + ball.r > floorTop) {
-      ball.y = floorTop - ball.r;
-      if (ball.vy > 0) ball.vy = 0;
-    }
-
-    const leftBound = 16 + ball.r;
-    const rightBound = 900 - 16 - ball.r;
-    if (ball.x < leftBound) { ball.x = leftBound; ball.vx = 0; ball.omega = 0; }
-    if (ball.x > rightBound) { ball.x = rightBound; ball.vx = 0; ball.omega = 0; }
+    // clear player visuals (player will respawn later)
   }
 
   function render() {
+    // background
     ctx.clearRect(0,0,900,480);
     const g = ctx.createLinearGradient(0,0,0,480);
-    g.addColorStop(0, '#0b0b12');
-    g.addColorStop(1, '#08080a');
-    ctx.fillStyle = g;
-    ctx.fillRect(0,0,900,480);
+    g.addColorStop(0, '#0b0b12'); g.addColorStop(1, '#08080a'); ctx.fillStyle = g; ctx.fillRect(0,0,900,480);
 
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, world.floorY, 900, 480 - world.floorY);
-
-    const shadowY = world.floorY - 6;
-    const shadowScale = Math.max(0.6, 1 - (ball.y / world.floorY));
-    ctx.beginPath();
-    ctx.ellipse(ball.x, shadowY, ball.r * 0.9 * shadowScale, ball.r * 0.3 * shadowScale, 0, 0, Math.PI*2);
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-    ctx.fill();
-
-    const grad = ctx.createRadialGradient(ball.x - ball.r*0.3, ball.y - ball.r*0.4, ball.r*0.1, ball.x, ball.y, ball.r);
-    grad.addColorStop(0, '#7ff28a');
-    grad.addColorStop(1, '#2ecc40');
-
-    ctx.beginPath();
-    ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2);
-    ctx.fillStyle = grad;
-    ctx.fill();
-
-    ctx.lineWidth = 4;
-    ctx.strokeStyle = '#1c5b24';
-    ctx.stroke();
-
-    // draw rotating highlight/mark
-    ctx.save();
-    ctx.translate(ball.x, ball.y);
-    ctx.rotate(ball.angle);
-    ctx.beginPath();
-    ctx.fillStyle = 'rgba(30,30,30,0.9)';
-    ctx.fillRect(-ball.r*0.05, -ball.r*0.9, ball.r*0.12, ball.r*0.55);
+    // draw grid faint
+    ctx.save(); ctx.globalAlpha = 0.06; ctx.strokeStyle='#ffffff'; ctx.lineWidth=1;
+    const size = grid * cam.zoom; for (let gx = (-(cam.x%grid)+(-grid*50)); gx < 900 + size; gx += grid) { ctx.beginPath(); ctx.moveTo((gx - cam.x%grid)*cam.zoom + 450, 0); ctx.lineTo((gx - cam.x%grid)*cam.zoom + 450, 480); ctx.stroke(); }
+    for (let gy = 0; gy < 480 + size; gy += grid) { ctx.beginPath(); ctx.moveTo(0, (gy - cam.y%grid)*cam.zoom + 240); ctx.lineTo(900, (gy - cam.y%grid)*cam.zoom + 240); ctx.stroke(); }
     ctx.restore();
 
-    // draw emoticon face ":3" in Comic Sans, slightly lighter than the outline
-    const faceColor = '#2f8f3b'; // slightly lighter green than outline '#1c5b24'
-    ctx.fillStyle = faceColor;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = `${Math.round(ball.r * 0.9)}px "Comic Sans MS", "Comic Sans", cursive`;
-    // slight shadow to make text pop on gradient
-    ctx.shadowColor = 'rgba(0,0,0,0.35)';
-    ctx.shadowBlur = 2;
-    ctx.fillText(':3', ball.x, ball.y + Math.round(ball.r * 0.04));
-    ctx.shadowBlur = 0;
+    // draw objects
+    for (const o of objects) {
+      const s1 = worldToScreen(o.x, o.y);
+      const sw = o.w * cam.zoom; const sh = o.h * cam.zoom;
+      if (o.type === 'block') {
+        ctx.fillStyle = '#ffffff'; ctx.fillRect(s1.x, s1.y, sw, sh);
+        ctx.strokeStyle = '#888'; ctx.lineWidth=2; ctx.strokeRect(s1.x, s1.y, sw, sh);
+      } else if (o.type === 'spike') {
+        // draw triangle spikes across the rect
+        ctx.fillStyle = '#ff5555';
+        const cols = Math.max(1, Math.round(o.w / grid));
+        for (let i=0;i<cols;i++) {
+          const px = s1.x + i * (sw/cols);
+          ctx.beginPath(); ctx.moveTo(px, s1.y + sh); ctx.lineTo(px + (sw/cols)/2, s1.y); ctx.lineTo(px + (sw/cols), s1.y + sh); ctx.closePath(); ctx.fill();
+        }
+      } else if (o.type === 'start') {
+        ctx.fillStyle = '#4da6ff'; ctx.fillRect(s1.x, s1.y, sw, sh); ctx.strokeStyle='#1b6fb3'; ctx.lineWidth=2; ctx.strokeRect(s1.x,s1.y,sw,sh);
+        ctx.fillStyle='#fff'; ctx.font='12px system-ui'; ctx.fillText('Start', s1.x+sw/2, s1.y+sh/2+4);
+      } else if (o.type === 'win') {
+        ctx.fillStyle = '#ffd24d'; ctx.fillRect(s1.x, s1.y, sw, sh); ctx.strokeStyle='#b3861b'; ctx.lineWidth=2; ctx.strokeRect(s1.x,s1.y,sw,sh);
+        ctx.fillStyle='#111'; ctx.font='12px system-ui'; ctx.fillText('Win', s1.x+sw/2, s1.y+sh/2+4);
+      }
+    }
 
-    ctx.fillStyle = '#ddd';
-    ctx.font = '12px system-ui';
-    ctx.fillText(`pos: ${ball.x.toFixed(1)}, ${ball.y.toFixed(1)}  vel: ${ball.vx.toFixed(1)}, ${ball.vy.toFixed(1)}`, 12, 18);
+    // draw player or freecam marker
+    if (mode === 'editor') {
+      // show camera center
+      ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.beginPath(); ctx.arc(450,240,10,0,Math.PI*2); ctx.fill(); ctx.stroke();
+    } else {
+      if (player.alive) {
+        // draw shadow
+        const sp = worldToScreen(player.x, player.y + player.r - 6);
+        ctx.beginPath(); ctx.ellipse(sp.x, sp.y, player.r*0.9*cam.zoom, player.r*0.3*cam.zoom, 0,0,Math.PI*2); ctx.fillStyle='rgba(0,0,0,0.25)'; ctx.fill();
+        // ball
+        const center = worldToScreen(player.x, player.y);
+        const grad = ctx.createRadialGradient(center.x - player.r*0.3*cam.zoom, center.y - player.r*0.4*cam.zoom, player.r*0.1*cam.zoom, center.x, center.y, player.r*cam.zoom);
+        grad.addColorStop(0, '#7ff28a'); grad.addColorStop(1, '#2ecc40'); ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.arc(center.x, center.y, player.r*cam.zoom, 0, Math.PI*2); ctx.fill(); ctx.lineWidth=4*cam.zoom; ctx.strokeStyle='#1c5b24'; ctx.stroke();
+
+        // face (upright)
+        ctx.fillStyle = '#2f8f3b'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.font = `${Math.round(player.r*0.9*cam.zoom)}px "Comic Sans MS", "Comic Sans", cursive`;
+        ctx.shadowColor = 'rgba(0,0,0,0.35)'; ctx.shadowBlur = 2; ctx.fillText(':3', center.x, center.y + Math.round(player.r*0.04*cam.zoom)); ctx.shadowBlur = 0;
+      } else {
+        // particles
+        for (const p of particles) {
+          const sp = worldToScreen(p.x, p.y);
+          ctx.save(); ctx.translate(sp.x, sp.y); ctx.rotate(p.angle);
+          ctx.fillStyle = '#7ff28a'; ctx.fillRect(-p.w/2*cam.zoom, -p.h/2*cam.zoom, p.w*cam.zoom, p.h*cam.zoom);
+          ctx.restore();
+        }
+      }
+    }
+
+    // HUD
+    ctx.fillStyle='#ddd'; ctx.font='12px system-ui'; ctx.fillText(`Objects: ${objects.length}`, 12, 18);
   }
 
   requestAnimationFrame(step);
