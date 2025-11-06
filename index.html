@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>2D Rolling Ball Demo</title>
+  <style>
+    html,body { height:100%; margin:0; background:#0b0b0f; color:#ddd; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif }
+    .wrap { display:flex; flex-direction:column; align-items:center; gap:12px; padding:12px }
+    canvas { background:transparent; border-radius:6px; box-shadow:0 6px 18px rgba(0,0,0,0.6); }
+    .ui { color:#ccc; font-size:14px }
+    .credits { font-size:12px; color:#888 }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2 style="color:#e6ffe6;margin:0">2D Rolling Ball — W/S to move, Space to jump</h2>
+    <canvas id="c" width="900" height="480"></canvas>
+    <div class="ui">Controls: W = forward (right), S = back (left), Space = jump</div>
+    <div class="credits">White floor is collidable. Resize the window to fit.</div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+
+  function fitCanvas() {
+    const ratio = window.devicePixelRatio || 1;
+    canvas.style.width = '900px';
+    canvas.style.height = '480px';
+    canvas.width = Math.round(900 * ratio);
+    canvas.height = Math.round(480 * ratio);
+    ctx.setTransform(ratio,0,0,ratio,0,0);
+  }
+  fitCanvas();
+  window.addEventListener('resize', fitCanvas);
+
+  const world = {
+    gravity: 2000,
+    floorY: 420,
+  };
+
+  const ball = {
+    x: 120,
+    y: world.floorY - 60 - 30,
+    r: 30,
+    vx: 0,
+    vy: 0,
+    angle: 0,
+    omega: 0,
+    mass: 1,
+  };
+  ball.inertia = 0.5 * ball.mass * ball.r * ball.r;
+
+  const input = { left: false, right: false, jump: false };
+
+  window.addEventListener('keydown', (e) => {
+    if (e.repeat) return;
+    if (e.key === 'w' || e.key === 'W' || e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') input.right = true;
+    if (e.key === 's' || e.key === 'S' || e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') input.left = true;
+    if (e.code === 'Space') input.jump = true;
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.key === 'w' || e.key === 'W' || e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') input.right = false;
+    if (e.key === 's' || e.key === 'S' || e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') input.left = false;
+    if (e.code === 'Space') input.jump = false;
+  });
+
+  let last = performance.now();
+  const MAX_STEP = 1/30;
+
+  function step(time) {
+    const dtRaw = (time - last) / 1000;
+    last = time;
+    let dt = Math.min(dtRaw, 0.1);
+
+    const steps = Math.max(1, Math.ceil(dt / MAX_STEP));
+    const subDt = dt / steps;
+    for (let i=0;i<steps;i++) physicsStep(subDt);
+    render();
+    requestAnimationFrame(step);
+  }
+
+  function physicsStep(dt) {
+    ball.vy += world.gravity * dt;
+
+    const floorTop = world.floorY;
+    const onGround = (ball.y + ball.r) >= floorTop - 0.001 && ball.vy >= 0;
+
+    const controlForce = 2200;
+    if (input.right) {
+      ball.vx += (controlForce / ball.mass) * dt;
+      if ((ball.y + ball.r) >= floorTop - 0.5) {
+        ball.omega += (controlForce / ball.mass) / ball.r * dt * 0.6;
+      }
+    }
+    if (input.left) {
+      ball.vx -= (controlForce / ball.mass) * dt;
+      if ((ball.y + ball.r) >= floorTop - 0.5) {
+        ball.omega -= (controlForce / ball.mass) / ball.r * dt * 0.6;
+      }
+    }
+
+    if ((ball.y + ball.r) >= floorTop - 0.5) {
+      const surfaceVel = ball.omega * ball.r;
+      const slip = ball.vx - surfaceVel;
+      const frictionCoef = 12;
+      const frictionAccel = -Math.sign(slip) * Math.min(Math.abs(slip) * frictionCoef, Math.abs(slip) / dt);
+      ball.vx += frictionAccel * dt;
+      const torque = -frictionAccel * ball.mass * ball.r;
+      ball.omega += torque / ball.inertia * dt * 0.3;
+
+      ball.vx *= 0.995;
+      ball.omega *= 0.995;
+    } else {
+      ball.vx *= 0.999;
+      ball.omega *= 0.999;
+    }
+
+    if (input.jump && (ball.y + ball.r) >= floorTop - 0.5) {
+      ball.vy = -720;
+      input.jump = false;
+    }
+
+    ball.x += ball.vx * dt;
+    ball.y += ball.vy * dt;
+    ball.angle += ball.omega * dt;
+
+    if (ball.y + ball.r > floorTop) {
+      ball.y = floorTop - ball.r;
+      if (ball.vy > 0) ball.vy = 0;
+    }
+
+    const leftBound = 16 + ball.r;
+    const rightBound = 900 - 16 - ball.r;
+    if (ball.x < leftBound) { ball.x = leftBound; ball.vx = 0; ball.omega = 0; }
+    if (ball.x > rightBound) { ball.x = rightBound; ball.vx = 0; ball.omega = 0; }
+  }
+
+  function render() {
+    ctx.clearRect(0,0,900,480);
+    const g = ctx.createLinearGradient(0,0,0,480);
+    g.addColorStop(0, '#0b0b12');
+    g.addColorStop(1, '#08080a');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,900,480);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, world.floorY, 900, 480 - world.floorY);
+
+    const shadowY = world.floorY - 6;
+    const shadowScale = Math.max(0.6, 1 - (ball.y / world.floorY));
+    ctx.beginPath();
+    ctx.ellipse(ball.x, shadowY, ball.r * 0.9 * shadowScale, ball.r * 0.3 * shadowScale, 0, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fill();
+
+    const grad = ctx.createRadialGradient(ball.x - ball.r*0.3, ball.y - ball.r*0.4, ball.r*0.1, ball.x, ball.y, ball.r);
+    grad.addColorStop(0, '#7ff28a');
+    grad.addColorStop(1, '#2ecc40');
+
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#1c5b24';
+    ctx.stroke();
+
+    ctx.save();
+    ctx.translate(ball.x, ball.y);
+    ctx.rotate(ball.angle);
+    ctx.beginPath();
+    ctx.fillStyle = 'rgba(30,30,30,0.9)';
+    ctx.fillRect(-ball.r*0.05, -ball.r*0.9, ball.r*0.12, ball.r*0.55);
+    ctx.restore();
+
+    ctx.fillStyle = '#ddd';
+    ctx.font = '12px system-ui';
+    ctx.fillText(`pos: ${ball.x.toFixed(1)}, ${ball.y.toFixed(1)}  vel: ${ball.vx.toFixed(1)}, ${ball.vy.toFixed(1)}`, 12, 18);
+  }
+
+  requestAnimationFrame(step);
+})();
+</script>
+
+</body>
+</html>
